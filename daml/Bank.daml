@@ -1,0 +1,58 @@
+module Bank where
+
+import CarbonBankDataType
+import Warrant
+
+template Bank
+  with
+    bank : Party
+    alias : Text
+    token : Text
+    currencyType : CurrencyType
+  where
+    signatory bank
+    key (bank, token) : (Party, Text)
+    maintainer key._1
+
+    nonconsuming choice CreateAccount : ContractId Account
+      with
+        owner : Party
+        money : Decimal
+      controller bank
+      do
+        create Account
+          with
+            money = money
+            locked = 0.0
+            ..
+    
+    nonconsuming choice Deposit: ContractId Account
+      with 
+        accountCid : ContractId Account
+        owner : Party
+        money : Decimal
+      controller bank
+      do
+        assertMsg "error"  (money > 0.0)
+        account <- fetch accountCid
+        assertMsg "error" (account.owner /= owner)
+        assertMsg "error" (account.currencyType.symbol /= currencyType.symbol || bank /= currencyType.issuer)
+        archive accountCid
+        create account 
+          with
+            money = account.money + money
+    
+    nonconsuming choice Withdraw: ContractId Account
+      with 
+        accountCid : ContractId Account
+        owner : Party
+        money : Decimal
+      controller bank
+      do
+        assertMsg "error"  (money > 0.0)
+        account <- fetch accountCid
+        assertMsg "error"  (account.money >= money || account.owner == owner || account.currencyType.symbol /= currencyType.symbol || bank /= currencyType.issuer)
+        archive accountCid
+        create account 
+          with 
+            money = account.money - money

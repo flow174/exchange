@@ -1,0 +1,399 @@
+module Warrant where
+
+import DA.Date
+import CarbonBankDataType
+
+-- Market
+template Market
+  with
+    name : Text
+    uniqueId : Text
+    warrants : [Warrant] --performance issue？
+    owner : Party
+    observers : [Party]
+  where
+    signatory owner
+    observer observers
+    key (owner, uniqueId) : (Party, Text)
+    maintainer key._1
+
+    choice AddObserver : ContractId Market
+      with observer : Party
+      controller owner 
+      do 
+        create this
+          with
+            observers = observer :: observers
+
+    choice AddWarrant : ContractId Market
+      with 
+        warrant : Warrant
+        creator : Party
+      controller creator
+      do
+        -- check creator in the observers
+        create this
+          with
+            warrants = warrant :: warrants
+
+--NFT
+template Warrant 
+  with
+    uniqueId : Text
+    warrantType : WarrantType
+    project : Project
+    issuer : Party
+    issueTime : Date
+    expiredTime : Date
+    stakeholders : [Party]
+    collection : Market
+  where
+    signatory issuer
+    observer stakeholders
+    key (issuer, uniqueId) : (Party, Text)
+    maintainer key._1
+
+    choice AddStakeholder : ContractId Warrant
+      with 
+        newStakeholder : Party
+        oneOfStakeholders : Party
+      controller oneOfStakeholders
+      do
+        create this 
+          with
+            stakeholders = newStakeholder :: stakeholders
+
+-- NFT stakeholder
+template Stakeholder
+  with
+    warrantId : Text
+    valid : Decimal -- valid stake
+    locked : Decimal -- locked stake
+    verified : Decimal -- verified stake
+    issuer : Party
+    owner : Party
+  where
+    signatory issuer
+    observer owner
+
+    key StakeholderKey with .. : StakeholderKey
+    maintainer key.issuer
+    
+    -- want to sell stake, get money
+    choice PostWarrantTransferOffer : (ContractId WarrantTransferOffer, ContractId Stakeholder)
+      with
+        offer : CurrencyOffer
+        bid : StakeBid
+        observers : [Party]
+      controller owner
+      do
+        assertMsg "transfer amount must greater than 0" (bid.amount > 0.0)
+        assertMsg "verify transfer amount must less than valid amount" (bid.amount < valid)
+        stakeholderCid <- create this
+          with
+            valid = valid - bid.amount
+            locked = locked + bid.amount
+        warrantTransferOfferCid <- create WarrantTransferOffer
+          with
+            ..
+        return (warrantTransferOfferCid, stakeholderCid)
+    
+    choice CreateVerification : ContractId VerificationProposal
+      with
+        verifyAmount : Decimal
+        verifier : Party
+      controller owner
+      do
+        create this
+          with
+            valid = valid - verifyAmount
+        create VerificationProposal
+          with
+            amount = verifyAmount
+            ..
+            
+template WarrantAcceptOffer
+  with
+    bid : StakeBid
+    issuer : Party
+    sendee : Party
+  where
+    signatory issuer
+    observer sendee
+
+    choice AcceptWarrant : ContractId Stakeholder
+      controller sendee
+      do
+        create Stakeholder
+          with
+            warrantId = bid.warrantId
+            valid = bid.amount
+            locked = 0.0
+            verified = 0.0
+            owner = sendee
+            ..
+
+template WarrantTransferOffer
+  with
+    offer : CurrencyOffer
+    bid : StakeBid
+    owner : Party
+    issuer : Party
+    observers : [Party]
+  where
+    signatory owner, issuer
+    observer observers
+    
+    choice CancelWarrantTransferOffer : ContractId Stakeholder
+      with
+        stakeholderCid : ContractId Stakeholder
+      controller owner
+      do
+        -- need some check
+        stakeholder <- fetch stakeholderCid
+        create stakeholder
+          with
+            valid = stakeholder.valid + bid.amount
+            locked = stakeholder.locked - bid.amount
+
+    choice AccpetWarrantTransferOffer : (ContractId AccountAcceptOffer, ContractId Stakeholder)
+      with
+        accountCid : ContractId Account
+        oneOfObservers : Party
+      controller oneOfObservers
+      do
+        -- need check error
+        account <- fetch accountCid
+        assertMsg "no enough money" (account.money > offer.money)
+
+        -- create money accept offer
+        let
+          currencyBid = Bid
+            with
+              money = offer.money
+              currencyType = offer.currencyType
+        accountAcceptOfferCid <- exercise accountCid CreateAccountAcceptOffer
+          with
+            bid = currencyBid
+            sendee = owner
+            ..
+
+        -- create stakeholder
+        stakeholderCid <- create Stakeholder
+          with
+            warrantId = bid.warrantId
+            valid = bid.amount
+            locked = 0.0
+            verified = 0.0
+            owner = oneOfObservers
+            ..
+        
+        return (accountAcceptOfferCid, stakeholderCid)
+
+-- carbon coin verification
+template VerificationCollection
+  with
+    unquieId : Text
+    verifier : Party
+    observers : [Party]
+    tickets : [ContractId VerificationTicket]
+  where
+    signatory verifier
+    observer observers
+    key (verifier, unquieId) : (Party, Text)
+    maintainer key._1
+
+    choice AddVerifyObserver : ContractId VerificationCollection
+      with
+        observer : Party
+      controller verifier 
+      do 
+        create this
+          with 
+            observers = observer :: observers
+
+    choice AddTicket : ContractId VerificationCollection
+      with
+        ticket : ContractId VerificationTicket
+      controller verifier
+      do
+        create this
+          with
+            tickets = ticket :: tickets
+        
+
+template VerificationProposal
+  with
+    owner : Party
+    warrantId : Text
+    verifier : Party
+    amount : Decimal
+  where
+    signatory owner
+    observer verifier
+
+    choice CannelVerificationProposal : ContractId Stakeholder
+      with
+        stakeholderCid : ContractId Stakeholder
+      controller owner
+      do
+        stakeholder <- fetch stakeholderCid
+        create stakeholder
+          with
+            valid = stakeholder.valid + amount
+            locked = stakeholder.locked - amount
+    
+    choice Verify : ContractId VerificationTicket
+      with
+        verificationCollectionCid : ContractId VerificationCollection
+      controller verifier
+      do
+        ticket <- create VerificationTicket
+          with
+            owner = owner
+            warrantId = warrantId
+            --date = getCurrentTime
+            verifiedDate = date 2022 Jan 01 
+            verifier = verifier
+        exercise verificationCollectionCid AddTicket
+          with
+            ..
+        return ticket
+
+template VerificationTicket
+  with
+    owner : Party
+    warrantId : Text
+    verifiedDate : Date
+    verifier : Party
+  where
+    signatory owner, verifier
+
+-- Account
+template Account 
+  with
+    bank : Party
+    owner : Party
+    money : Decimal
+    locked : Decimal
+    currencyType : CurrencyType
+  where
+    signatory bank
+    observer owner
+    key (bank, owner) : (Party, Party)
+    maintainer key._1
+
+    ensure money >= 0.0 && locked >= 0.0 
+
+    choice CreateAccountAcceptOffer : ContractId AccountAcceptOffer
+      with
+        sendee : Party
+        bid : Bid -- money
+      controller owner
+      do
+        -- need some check
+        create this
+          with 
+            money = money - bid.money
+        create AccountAcceptOffer
+          with
+            ..
+    
+    choice PostAccountTransferOffer : ContractId AccountTransferOffer
+      with
+        offer : StakeOffer -- want to buy some stake
+        bid : Bid
+        observers : [Party]
+      controller owner
+      do
+        -- need some check
+        create this
+          with
+            money = money - bid.money
+            locked = locked + bid.money
+        create AccountTransferOffer
+          with
+            ..
+            
+template AccountAcceptOffer
+  with
+    bank : Party
+    owner : Party
+    sendee : Party
+    bid : Bid
+  where
+    signatory bank, owner
+    observer sendee
+
+    choice AcceptAccountAcceptOffer : ContractId Account
+      with
+        accountCid : ContractId Account
+      controller sendee
+      do
+        account <- fetch accountCid
+        -- do some check
+        archive accountCid
+        create account
+          with 
+            money = account.money + bid.money
+
+template AccountTransferOffer
+  with
+    bank : Party
+    owner : Party
+    observers : [Party]
+    offer : StakeOffer
+    bid : Bid
+  where
+    signatory bank, owner
+    observer observers
+
+    choice CannelTransfer : ContractId Account
+      with
+        accountCid : ContractId Account
+      controller owner
+      do
+        -- do some check
+        account <- fetch accountCid
+        create account 
+          with
+            money = account.money + bid.money
+    
+    choice AcceptAccountTransferOffer : ContractId WarrantAcceptOffer
+      with
+        stakeholderCid : ContractId Stakeholder
+        accountCid: ContractId Account
+        oneOfObservers : Party
+      controller oneOfObservers
+      do
+        stakeholder <- fetch stakeholderCid
+        -- check
+        assertMsg "error" (stakeholder.valid > offer.amount) -- I think also need check warrant type
+        
+        -- update stakeholder
+        archive stakeholderCid
+        create stakeholder
+          with
+            valid = stakeholder.locked - offer.amount -- need check
+      
+        -- accept money
+        account <- fetch accountCid
+        archive accountCid
+        create account
+          with
+            money = account.money + bid.money
+
+        -- create WarrantAcceptOffer, let sendee accept stake
+        let
+          stakeBid = StakeBid
+            with
+              warrantId = stakeholder.warrantId
+              warrantType = offer.warrantType
+              amount = offer.amount
+        
+        create WarrantAcceptOffer
+          with
+            issuer = stakeholder.issuer
+            sendee = owner
+            bid = stakeBid
+            ..

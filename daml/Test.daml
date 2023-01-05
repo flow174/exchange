@@ -1,0 +1,91 @@
+module Test where
+
+import Daml.Script
+import CarbonBankDataType
+import Bank
+import Warrant
+import WarrantAuthority
+import DA.Date
+
+test = script do
+  bank <- allocateParty "bank"
+ 
+  market <- allocateParty "market"
+  authority <- allocateParty "authority"
+
+  userA <- allocateParty "userA"
+  userB <- allocateParty "userB"
+
+  let
+    currencyType = CurrencyType
+      with
+        issuer = bank
+        symbol = "RMB"
+    
+    warrantType = WarrantType
+      with
+        issuer = authority
+        symbol = "Solar"
+    
+    userAProject = Project
+      with
+        name = "Epam internal test project"
+        number = "001"
+        amount = 1000.0
+        owner = "userA"
+
+  -- 初始化银行
+  bankCid <- submit bank do createCmd Bank with alias = "ICBC", token = "ICDB TOKEN", ..
+  
+  -- 创建银行账号A和B
+  accountACid <- submit bank do exerciseCmd bankCid CreateAccount with owner = userA, money = 1000.0
+  accountBCid <- submit bank do exerciseCmd bankCid CreateAccount with owner = userB, money = 1000.0
+
+  -- 初始化权证机构
+  authorityCid <- submit authority do createCmd Authority with creatorId = "authority token", creator = authority
+
+  -- 初始化市场
+  marketCid <- submit market do createCmd Market with name = "Epam", uniqueId = "Epam unique id", owner = market, warrants = [], observers = [authority]
+
+  -- 创建WarrantA
+  (warrantCid , stakeholderACid) <- submit authority
+    do exerciseCmd authorityCid CreateWarrant 
+        with 
+            uniqueId = "unique warrant id"
+            warrantType = warrantType
+            project = userAProject
+            expiredTime = date 2024 Jan 01
+            owner = userA
+            market  = Market with name = "Epam", uniqueId = "Epam unique id", owner = market, warrants = [], observers = [authority] -- 需要优化
+  
+  let
+    currencyOffer = CurrencyOffer
+      with
+        currencyType = currencyType
+        money = 100.0
+    
+    stakeBid = StakeBid
+      with
+        amount = 100.0
+        warrantId = "unique warrant id"
+        warrantType = warrantType
+
+  -- userA挂单售卖Warrant
+  (warrantTransferOfferCid, stakeholderACid) <- submit userA
+    do exerciseCmd stakeholderACid PostWarrantTransferOffer
+        with
+            offer = currencyOffer
+            bid = stakeBid
+            observers = [market, userA, userB] -- 需要优化
+  
+  -- userB认购warrant
+  (accountAcceptOfferCid, stakeholderBCid) <- submit userB
+    do exerciseCmd warrantTransferOfferCid AccpetWarrantTransferOffer
+        with
+          accountCid = accountBCid
+          oneOfObservers = userB
+  
+  -- userA接受money
+  submit userA do exerciseCmd accountAcceptOfferCid  AcceptAccountAcceptOffer with accountCid = accountACid
+
+  pure()

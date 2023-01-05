@@ -1,0 +1,9 @@
+module User where
+
+template User with
+    owner: Party
+    icon: Text
+    alias: Text
+  where
+    signatory owner
+    

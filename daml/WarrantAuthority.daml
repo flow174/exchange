@@ -1,0 +1,46 @@
+module WarrantAuthority where
+
+import Warrant
+import DA.Date
+import CarbonBankDataType
+
+-- Authority
+template Authority
+  with
+    creatorId: Text
+    creator: Party
+  where
+    signatory creator
+    key (creator, creatorId): (Party, Text)
+    maintainer key._1
+
+    nonconsuming choice CreateWarrant: (ContractId Warrant, ContractId Stakeholder)
+      with
+        uniqueId :Text
+        warrantType : WarrantType
+        project : Project
+        expiredTime : Date
+        owner : Party
+        market : Market
+      controller creator
+      do
+        warrantCid <- create Warrant 
+          with
+            uniqueId = uniqueId
+            warrantType = warrantType
+            project = project
+            issueTime = date 2022 Jan 01 -- need get current date
+            expiredTime = expiredTime
+            stakeholders = [owner]
+            collection = market
+            issuer = creator
+        stakeholderCid <- create Stakeholder 
+          with
+            warrantId = uniqueId
+            valid = project.amount
+            locked = 0.0
+            verified = 0.0
+            owner = owner
+            issuer = creator
+        warrant <- fetch warrantCid
+        return (warrantCid, stakeholderCid)

@@ -1,0 +1,53 @@
+module CarbonBankDataType where
+
+data CurrencyType = CurrencyType
+  with
+    issuer: Party
+    symbol: Text
+      deriving (Eq, Show)
+
+data CurrencyOffer = CurrencyOffer
+  with
+    currencyType : CurrencyType
+    money : Decimal
+      deriving(Show, Eq)
+
+data WarrantType = WarrantType 
+  with
+    issuer: Party
+    symbol: Text
+      deriving(Show, Eq)
+
+data StakeOffer = StakeOffer
+  with
+    warrantType : WarrantType
+    amount : Decimal
+      deriving(Show, Eq)
+
+data Project = Project
+  with
+    name: Text
+    number: Text
+    amount: Decimal
+    owner: Text
+      deriving(Show, Eq)
+
+data Bid = Bid
+  with
+    money : Decimal
+    currencyType : CurrencyType
+      deriving(Show, Eq)
+
+data StakeBid = StakeBid
+  with
+    amount : Decimal
+    warrantId : Text
+    warrantType : WarrantType
+      deriving(Show, Eq)
+
+data StakeholderKey = StakeholderKey
+  with
+    issuer : Party
+    owner : Party
+    warrantId : Text
+      deriving(Show, Eq)
