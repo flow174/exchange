@@ -1,20 +1,24 @@
+{-# LANGUAGE ApplicativeDo #-}
+
 module Warrant where
 
-import DA.Date
+import DA.Date hiding (update)
 import CarbonBankDataType
+import DA.List
+import DA.Map
 
 -- Market
 template Market
   with
+    id : Text
     name : Text
-    uniqueId : Text
     warrants : [Warrant] --performance issue？
     owner : Party
     observers : [Party]
   where
     signatory owner
     observer observers
-    key (owner, uniqueId) : (Party, Text)
+    key (owner, id) : (Party, Text)
     maintainer key._1
 
     choice AddObserver : ContractId Market
@@ -36,39 +40,336 @@ template Market
           with
             warrants = warrant :: warrants
 
+
+-- Market maker
+template AccountOrderContainer
+  with
+    orders : Map  (ContractId AccountOrder) AccountOrder
+    owner : Party
+  where
+    signatory owner
+    key owner : Party
+    maintainer key
+
+    choice AccountOrderContainer_Add : ContractId AccountOrderContainer
+      with 
+        k : ContractId AccountOrder
+      controller owner
+      do
+        v <- fetch k
+        create this with orders = insert k v orders
+    
+    choice AccountOrderContainer_Remove : ContractId AccountOrderContainer
+      with
+        k :  ContractId AccountOrder
+      controller owner
+      do
+        debug orders
+        let newOrders = (DA.Map.delete k orders)
+        debug newOrders
+        create this with orders = newOrders
+
+template WarrantOrderContainer
+  with
+    orders : Map (ContractId WarrantOrder) WarrantOrder
+    owner : Party
+  where
+    signatory owner
+    key owner : Party
+    maintainer key
+
+    choice WarrantOrderContainer_Add : ContractId WarrantOrderContainer
+      with
+        k : ContractId WarrantOrder
+      controller owner
+      do
+        v <- fetch k
+        create this with orders = insert k v orders
+    
+    choice WarrantOrderContainer_Remove : ContractId WarrantOrderContainer
+      with
+        k : ContractId WarrantOrder
+      controller owner
+      do
+        create this with orders = (DA.Map.delete k orders)
+
+template MarketMaker
+  with
+    id : Text
+    name : Text
+    maker : Party
+    observers : [Party]
+  where
+    signatory maker
+    observer observers
+
+    nonconsuming choice CreateMirror : ContractId WarrantMirror
+      with
+        w : ContractId Warrant
+        warrant : Warrant
+      controller maker
+      do
+        let warrantMirrorKey = (maker, warrant.id)
+        r <- lookupByKey @WarrantMirror warrantMirrorKey
+        case r of
+          None -> do 
+            cid <- create WarrantMirror with warrantId = warrant.id, owner = maker, warrantCid = w
+            pure(cid)
+          Some x -> 
+            pure(x)
+
+    nonconsuming choice HandleWarrantOrder : (Optional (ContractId AccountAcceptOffer), Optional (ContractId WarrantAcceptOffer))
+      with 
+        k : ContractId WarrantOrder
+        w : ContractId Warrant
+      controller maker
+      do
+        debug "Handle Warrant Order start"
+        v <- fetch k
+
+        warrant <- fetch w
+        assertMsg "Not the same warrant" (warrant.id == v.bid.warrantId)
+
+        -- create warrant mirror
+        m <- exercise self CreateMirror with ..
+
+        (accountOrderContainerCid, accountOrderContainer) <- fetchByKey @AccountOrderContainer maker
+        (warrantOrderContainerCid, warrantOrderContainer) <- fetchByKey @WarrantOrderContainer maker
+
+        if size accountOrderContainer.orders == 0 then do 
+          exercise warrantOrderContainerCid WarrantOrderContainer_Add with ..
+          return (None, None)
+
+        else do
+          let orderList = toList accountOrderContainer.orders
+              sortedAccountOrderList = sortBy sortByPrice orderList -- order by DESC
+              matchedOrders = warrantMatchAccountOrder v sortedAccountOrderList
+
+          debug sortedAccountOrderList
+          debug matchedOrders
+
+          if (length matchedOrders) == 0 then do
+            debug "No matched account order"
+            exercise warrantOrderContainerCid WarrantOrderContainer_Add with .. 
+            return (None, None)
+          else do
+            let x = head matchedOrders
+
+            -- transaction price：warrant order 
+            if (v.bid.amount == x._2.offer.amount) then do
+              debug "equal condition"
+              -- remove from account container
+              exercise accountOrderContainerCid AccountOrderContainer_Remove with k = x._1
+              -- make a deal
+              -- archive account order and create an account accept offer
+              accountAcceptOfferCid <- exercise x._1 AccountOrder_AcceptAll with warrantOrder = v
+
+              -- archive warrant order and create a warrant accept offer
+              warrantAcceptOfferCid <- exercise k WarrantOrder_AcceptAll with sendee = x._2.owner
+
+              -- add new stakeholder to warrant
+              w <- exercise w Warrant_AddStakeholder with newStakeholder = x._2.owner
+              exercise m WarrantMirror_Update with newCid = w
+
+              pure(Some accountAcceptOfferCid, Some warrantAcceptOfferCid)
+            
+            -- partial trade : account order amount biger than warrant order amount
+            else if x._2.offer.amount > v.bid.amount then do
+              debug ("bigger condition, partial trade, account amount: " <> show x._2.offer.amount <> ", warrant amount: " <> show v.bid.amount)
+              -- remove from account container
+              accountOrderContainerCid <- exercise accountOrderContainerCid AccountOrderContainer_Remove with k = x._1
+              
+              -- make a partial deal
+              -- should change account order data, create a new one, and also need creae a account accept offer
+              (accountAcceptOfferCid, accountOrderCid) <- exercise x._1 AccountOrder_AcceptPart with warrantOrder = v
+
+              -- archive warrant order and create a warrant accept offer
+              warrantAcceptOfferCid <- exercise k WarrantOrder_AcceptAll with sendee = x._2.owner
+
+              -- add new stakeholder to warrant
+              w <- exercise w Warrant_AddStakeholder with newStakeholder = x._2.owner
+              exercise m WarrantMirror_Update with newCid = w
+
+              -- add the new account order into the container
+              exercise accountOrderContainerCid AccountOrderContainer_Add with k = accountOrderCid
+
+              pure(Some accountAcceptOfferCid, Some warrantAcceptOfferCid)
+            
+            -- partial trade : account order amount less than warrant order amount
+            -- if v.bid.amount > x._2.offer.amount
+            else do
+              debug ("less condition, partial trade, account amount: " <> show x._2.offer.amount <> " > warrant amount: " <> show v.bid.amount)
+              -- remove from account container
+              exercise accountOrderContainerCid AccountOrderContainer_Remove with k = x._1
+
+              -- make a deal
+              -- archive account order and create an account accept offer
+              accountAcceptOfferCid <- exercise x._1 AccountOrder_AcceptAll with warrantOrder = v
+
+              -- make a partial deal
+              -- should change warrant order data, create a new one, and also need creae a warrant accept offer
+              (warrantAcceptOfferCid, warrantOrderCid) <- exercise k WarrantOrder_AcceptPart with accountOrder = x._2
+
+              -- add new stakeholder to warrant
+              w <- exercise w Warrant_AddStakeholder with newStakeholder = x._2.owner
+              exercise m WarrantMirror_Update with newCid = w
+
+              -- continue to match, recursion model
+              exercise self HandleWarrantOrder with k = warrantOrderCid, ..
+
+    nonconsuming choice HandleAccountOrder : (Optional (ContractId AccountAcceptOffer), Optional (ContractId WarrantAcceptOffer))
+      with
+        k : ContractId AccountOrder
+      controller maker
+      do
+        debug "Handle Account Order start"
+        v <- fetch k
+
+        (accountOrderContainerCid, accountOrderContainer) <- fetchByKey @AccountOrderContainer maker
+        (warrantOrderContainerCid, warrantOrderContainer) <- fetchByKey @WarrantOrderContainer maker
+
+        if size warrantOrderContainer.orders == 0 then do 
+          exercise accountOrderContainerCid AccountOrderContainer_Add with ..
+          return (None, None)
+
+        else do
+          let orderList = toList warrantOrderContainer.orders
+              sortedWarrantOrderList = sortBy sortByWarrantPrice orderList -- order by ASC
+              matchedOrders = accountMatchWarrantOrder v sortedWarrantOrderList
+
+          debug sortedWarrantOrderList
+          debug matchedOrders
+
+          if (length matchedOrders) == 0 then do
+            exercise accountOrderContainerCid AccountOrderContainer_Add with .. 
+            return (None, None)
+          else do
+            let x = head matchedOrders 
+            
+            -- get Warrant Mirror
+            let warrantMirrorKey = (maker, x._2.bid.warrantId)
+            (mCid, m) <- fetchByKey @WarrantMirror warrantMirrorKey
+
+            -- transaction price：warrant order 
+            if (v.offer.amount == x._2.bid.amount) then do
+              debug "equal condition"
+              -- remove from warrant container
+              exercise warrantOrderContainerCid WarrantOrderContainer_Remove with k = x._1
+              
+              -- archive account order and create a account accept offer
+              -- if account order price biger than warrant order price, should create a refund account accept offer to account order owner
+              accountAcceptOfferCid <- exercise k AccountOrder_AcceptAll with warrantOrder = x._2
+
+              -- archive warrant order and create a warrant accept offer 
+              warrantAcceptOfferCid <- exercise x._1 WarrantOrder_AcceptAll with sendee = v.owner
+
+              -- add new stakeholder to warrant
+              w <- exercise m.warrantCid Warrant_AddStakeholder with newStakeholder = v.owner
+              exercise mCid WarrantMirror_Update with newCid = w
+
+              pure(Some accountAcceptOfferCid, Some warrantAcceptOfferCid)
+            
+            -- amount of the account order not enough
+            else if v.offer.amount < x._2.bid.amount then do
+              debug ("bigger condition, partial trade, warrant amount: " <> show x._2.bid.amount <> " > account amount: " <> show v.offer.amount)
+              -- remove from warrant container
+              warrantOrderContainerCid <- exercise warrantOrderContainerCid WarrantOrderContainer_Remove with k = x._1
+              
+              -- accept money create account accept offer
+              accountAcceptOfferCid <- exercise k AccountOrder_AcceptAll with warrantOrder = x._2
+
+              -- accept partial warrant and create a new warrant order
+              (warrantAcceptOfferCid, warrantOrderCid) <- exercise x._1 WarrantOrder_AcceptPart with accountOrder = v
+
+              -- add new stakeholder to warrant
+              w <- exercise m.warrantCid Warrant_AddStakeholder with newStakeholder = v.owner
+              exercise mCid WarrantMirror_Update with newCid = w
+
+              -- add back
+              exercise warrantOrderContainerCid WarrantOrderContainer_Add with k = warrantOrderCid
+
+              pure(Some accountAcceptOfferCid, Some warrantAcceptOfferCid)
+            
+            -- amount of the warrant order not eough
+            -- if v.bid.amount > x._2.offer.amount
+            else do
+              debug ("less condition, partial trade, warrant amount: " <> show x._2.bid.amount <> " < account amount: " <> show v.offer.amount)
+              -- remove from warrant container
+              exercise warrantOrderContainerCid WarrantOrderContainer_Remove with k = x._1
+
+              -- archive warrant order and create a warrant accept offer 
+              warrantAcceptOfferCid <- exercise x._1 WarrantOrder_AcceptAll with sendee = v.owner
+
+               -- add new stakeholder to warrant
+              w <- exercise m.warrantCid Warrant_AddStakeholder with newStakeholder = v.owner
+              exercise mCid WarrantMirror_Update with newCid = w
+
+              -- partial trade
+              -- accept partial money, and create a new account order 
+              (accountAcceptOfferCid, accountOrderCid) <- exercise k AccountOrder_AcceptPart with warrantOrder = x._2
+
+              -- continue to match, recursion model
+              exercise self HandleAccountOrder with k = accountOrderCid
+
 --NFT
 template Warrant 
   with
-    uniqueId : Text
+    id : Text
     warrantType : WarrantType
     project : Project
     issuer : Party
     issueTime : Date
     expiredTime : Date
     stakeholders : [Party]
-    collection : Market
+    delegate : Optional Party
   where
     signatory issuer
-    observer stakeholders
-    key (issuer, uniqueId) : (Party, Text)
+    observer stakeholders, delegate
+    key (issuer, id) : (Party, Text)
     maintainer key._1
 
-    choice AddStakeholder : ContractId Warrant
+    choice Warrant_AddStakeholder : ContractId Warrant
       with 
         newStakeholder : Party
-        oneOfStakeholders : Party
-      controller oneOfStakeholders
+      controller delegate
       do
         create this 
           with
             stakeholders = newStakeholder :: stakeholders
+    
+    choice Warrant_SetDelegate : ContractId Warrant
+      with
+        newDelegate : Party
+        oneOfObservers : Party
+      controller oneOfObservers
+      do
+        create this
+          with
+            delegate = Some newDelegate
+
+-- This template used to connect warrant with delegate
+template WarrantMirror
+  with
+    warrantCid : ContractId Warrant
+    warrantId : Text
+    owner : Party
+  where
+    signatory owner
+    key (owner, warrantId) : (Party, Text)
+    maintainer key._1
+
+    choice WarrantMirror_Update : ContractId WarrantMirror
+      with newCid : ContractId Warrant
+      controller owner
+      do
+        create this with warrantCid = newCid
 
 -- NFT stakeholder
 template Stakeholder
   with
     warrantId : Text
     valid : Decimal -- valid stake
-    locked : Decimal -- locked stake
+    locked : Decimal
     verified : Decimal -- verified stake
     issuer : Party
     owner : Party
@@ -80,25 +381,31 @@ template Stakeholder
     maintainer key.issuer
     
     -- want to sell stake, get money
-    choice PostWarrantTransferOffer : (ContractId WarrantTransferOffer, ContractId Stakeholder)
+    choice Stakeholder_PostOrder : (ContractId WarrantOrder, ContractId Stakeholder)
       with
         offer : CurrencyOffer
         bid : StakeBid
         observers : [Party]
+        delegate : Party
       controller owner
       do
+        -- issuer , owner signatory
+        -- create any contract signatory is issuer and owner
         assertMsg "transfer amount must greater than 0" (bid.amount > 0.0)
         assertMsg "verify transfer amount must less than valid amount" (bid.amount < valid)
+        currentTime <- getTime
         stakeholderCid <- create this
           with
             valid = valid - bid.amount
             locked = locked + bid.amount
-        warrantTransferOfferCid <- create WarrantTransferOffer
+        warrantOrderCid <- create WarrantOrder
           with
+            traded = 0.0
+            createTime = currentTime
             ..
-        return (warrantTransferOfferCid, stakeholderCid)
+        return (warrantOrderCid, stakeholderCid)
     
-    choice CreateVerification : ContractId VerificationProposal
+    choice Stakeholder_CreateVerification : ContractId VerificationProposal
       with
         verifyAmount : Decimal
         verifier : Party
@@ -121,7 +428,7 @@ template WarrantAcceptOffer
     signatory issuer
     observer sendee
 
-    choice AcceptWarrant : ContractId Stakeholder
+    choice WarrantAcceptOffer_Accept : ContractId Stakeholder
       controller sendee
       do
         create Stakeholder
@@ -133,30 +440,34 @@ template WarrantAcceptOffer
             owner = sendee
             ..
 
-template WarrantTransferOffer
+template WarrantOrder
   with
-    offer : CurrencyOffer
-    bid : StakeBid
+    offer : CurrencyOffer -- want to get money
+    traded : Decimal
+    bid : StakeBid -- provide stake
+    createTime : Time
     owner : Party
     issuer : Party
+    delegate: Party
     observers : [Party]
   where
     signatory owner, issuer
-    observer observers
+    observer observers, delegate
     
-    choice CancelWarrantTransferOffer : ContractId Stakeholder
+    -- cancel warrant order
+    choice WarrantOrder_Cancel : ContractId Stakeholder
       with
         stakeholderCid : ContractId Stakeholder
       controller owner
       do
-        -- need some check
         stakeholder <- fetch stakeholderCid
         create stakeholder
           with
             valid = stakeholder.valid + bid.amount
             locked = stakeholder.locked - bid.amount
 
-    choice AccpetWarrantTransferOffer : (ContractId AccountAcceptOffer, ContractId Stakeholder)
+    -- accept warrant order
+    choice WarrantOrder_Accpet : (ContractId AccountAcceptOffer, ContractId Stakeholder)
       with
         accountCid : ContractId Account
         oneOfObservers : Party
@@ -164,15 +475,15 @@ template WarrantTransferOffer
       do
         -- need check error
         account <- fetch accountCid
-        assertMsg "no enough money" (account.money > offer.money)
+        assertMsg "no enough money" (account.money > offer.price)
 
         -- create money accept offer
         let
           currencyBid = Bid
             with
-              money = offer.money
+              price = offer.price
               currencyType = offer.currencyType
-        accountAcceptOfferCid <- exercise accountCid CreateAccountAcceptOffer
+        accountAcceptOfferCid <- exercise accountCid Account_CreateAcceptOffer
           with
             bid = currencyBid
             sendee = owner
@@ -189,6 +500,23 @@ template WarrantTransferOffer
             ..
         
         return (accountAcceptOfferCid, stakeholderCid)
+    
+    choice WarrantOrder_AcceptAll : ContractId WarrantAcceptOffer
+      with
+        sendee : Party
+      controller delegate
+      do
+        create WarrantAcceptOffer with ..
+    
+    choice WarrantOrder_AcceptPart : (ContractId WarrantAcceptOffer, ContractId WarrantOrder)
+      with
+        accountOrder : AccountOrder
+      controller delegate
+      do
+        warrantAcceptOffercid <- create WarrantAcceptOffer with sendee = accountOrder.owner, ..
+        warrantOrderCid <- create this with traded = traded + accountOrder.offer.amount, bid.amount = bid.amount - accountOrder.offer.amount
+        pure(warrantAcceptOffercid, warrantOrderCid)
+
 
 -- carbon coin verification
 template VerificationCollection
@@ -219,8 +547,7 @@ template VerificationCollection
       do
         create this
           with
-            tickets = ticket :: tickets
-        
+            tickets = ticket :: tickets      
 
 template VerificationProposal
   with
@@ -241,7 +568,6 @@ template VerificationProposal
         create stakeholder
           with
             valid = stakeholder.valid + amount
-            locked = stakeholder.locked - amount
     
     choice Verify : ContractId VerificationTicket
       with
@@ -269,6 +595,7 @@ template VerificationTicket
   where
     signatory owner, verifier
 
+
 -- Account
 template Account 
   with
@@ -283,9 +610,9 @@ template Account
     key (bank, owner) : (Party, Party)
     maintainer key._1
 
-    ensure money >= 0.0 && locked >= 0.0 
+    ensure money >= 0.0
 
-    choice CreateAccountAcceptOffer : ContractId AccountAcceptOffer
+    choice Account_CreateAcceptOffer : ContractId AccountAcceptOffer
       with
         sendee : Party
         bid : Bid -- money
@@ -294,38 +621,46 @@ template Account
         -- need some check
         create this
           with 
-            money = money - bid.money
+            money = money - bid.price
         create AccountAcceptOffer
           with
+            comments = None
             ..
     
-    choice PostAccountTransferOffer : ContractId AccountTransferOffer
+    choice Account_PostOrder : (ContractId Account, (ContractId AccountOrder))
       with
         offer : StakeOffer -- want to buy some stake
         bid : Bid
         observers : [Party]
+        delegate : Party
       controller owner
       do
         -- need some check
-        create this
+        assertMsg "no enough money" (money >= bid.price * offer.amount)
+        accountCid1 <- create this
           with
-            money = money - bid.money
-            locked = locked + bid.money
-        create AccountTransferOffer
+            money = money - (bid.price * offer.amount)
+            locked =  locked + (bid.price * offer.amount)
+        currentTime <- getTime
+        accountOrderCid <- create AccountOrder
           with
+            traded = 0.0
+            createTime = currentTime
             ..
+        pure(accountCid1, accountOrderCid)
             
 template AccountAcceptOffer
   with
     bank : Party
     owner : Party
     sendee : Party
-    bid : Bid
+    money : Decimal
+    comments : Optional Text
   where
     signatory bank, owner
     observer sendee
 
-    choice AcceptAccountAcceptOffer : ContractId Account
+    choice AccountAcceptOffer_Accept : ContractId Account
       with
         accountCid : ContractId Account
       controller sendee
@@ -335,20 +670,23 @@ template AccountAcceptOffer
         archive accountCid
         create account
           with 
-            money = account.money + bid.money
+            money = account.money + money
 
-template AccountTransferOffer
+template AccountOrder
   with
+    offer : StakeOffer -- want to buy stake
+    traded : Decimal
+    bid : Bid -- provide money
+    createTime : Time
     bank : Party
     owner : Party
+    delegate : Party
     observers : [Party]
-    offer : StakeOffer
-    bid : Bid
   where
     signatory bank, owner
-    observer observers
-
-    choice CannelTransfer : ContractId Account
+    observer observers, delegate
+    
+    choice AccountOrder_Cancel : ContractId Account
       with
         accountCid : ContractId Account
       controller owner
@@ -357,9 +695,10 @@ template AccountTransferOffer
         account <- fetch accountCid
         create account 
           with
-            money = account.money + bid.money
+            money = account.money + (bid.price * offer.amount)
+            locked = account.locked - (bid.price * offer.amount)
     
-    choice AcceptAccountTransferOffer : ContractId WarrantAcceptOffer
+    choice AccountOrder_Accept : ContractId WarrantAcceptOffer
       with
         stakeholderCid : ContractId Stakeholder
         accountCid: ContractId Account
@@ -372,16 +711,13 @@ template AccountTransferOffer
         
         -- update stakeholder
         archive stakeholderCid
-        create stakeholder
-          with
-            valid = stakeholder.locked - offer.amount -- need check
-      
+
         -- accept money
         account <- fetch accountCid
         archive accountCid
         create account
           with
-            money = account.money + bid.money
+            money = account.money + bid.price
 
         -- create WarrantAcceptOffer, let sendee accept stake
         let
@@ -397,3 +733,98 @@ template AccountTransferOffer
             sendee = owner
             bid = stakeBid
             ..
+    
+    postconsuming choice AccountOrder_AcceptAll : ContractId AccountAcceptOffer
+      with warrantOrder : WarrantOrder
+      controller delegate
+      do
+        if (warrantOrder.offer.price < bid.price) then do
+          debug "need refund"
+          -- this will create a refund account accept offer to account offer owner
+          let refundMoney = offer.amount * (bid.price - warrantOrder.offer.price)
+          exercise self AccountOrder_Refund with refundMoney = refundMoney
+
+          -- create a account accept offer to warrant owner
+          create AccountAcceptOffer 
+            with
+              sendee = warrantOrder.owner
+              money = warrantOrder.offer.price * offer.amount
+              comments = None
+              ..
+
+        else do
+          create AccountAcceptOffer
+            with
+              sendee = warrantOrder.owner
+              money = warrantOrder.offer.price * offer.amount
+              comments = None
+              ..
+    
+    nonconsuming choice AccountOrder_Refund : ContractId AccountAcceptOffer
+      with refundMoney: Decimal
+      controller delegate
+      do
+        debug "execrise AccountOrder_Refund"
+        create AccountAcceptOffer with sendee = owner, money = refundMoney, comments = Some "Refund", ..
+
+    postconsuming choice AccountOrder_AcceptPart : (ContractId AccountAcceptOffer, ContractId AccountOrder)
+      with warrantOrder : WarrantOrder
+      controller delegate
+      do
+        if (warrantOrder.offer.price < bid.price) then do
+          -- this will create a refund account accept offer to account offer owner
+          let refundMoney = warrantOrder.bid.amount * (bid.price - warrantOrder.offer.price)
+          exercise self AccountOrder_Refund with refundMoney = refundMoney
+          debug "create a new account order"
+          -- create a new account order
+          accountOrderCid <- create this 
+            with
+              traded = traded + warrantOrder.bid.amount
+              offer.amount = offer.amount - warrantOrder.bid.amount
+          debug "create a new account accept offer"
+          -- create a account accept offer
+          accountAcceptOfferCid <- create AccountAcceptOffer 
+            with 
+              sendee = warrantOrder.owner
+              money = warrantOrder.bid.amount * warrantOrder.offer.price
+              comments = None
+              ..
+          return (accountAcceptOfferCid, accountOrderCid)
+        else do
+          accountOrderCid <- create this 
+            with
+              traded = traded + warrantOrder.bid.amount
+              offer.amount = offer.amount - warrantOrder.bid.amount
+          accountAcceptOfferCid <- create AccountAcceptOffer 
+            with 
+              sendee = warrantOrder.owner
+              money = warrantOrder.bid.amount * warrantOrder.offer.price
+              comments = None
+              ..
+          return (accountAcceptOfferCid, accountOrderCid)
+
+
+sortByPrice : (ContractId AccountOrder, AccountOrder) -> (ContractId AccountOrder, AccountOrder) -> Ordering
+sortByPrice o1 o2 =  compare o2._2.bid.price o1._2.bid.price
+
+sortByTime :  AccountOrder -> AccountOrder -> Ordering
+sortByTime a1 a2 = compare a1.createTime a2.createTime
+
+sortByWarrantPrice : (ContractId WarrantOrder, WarrantOrder) -> (ContractId WarrantOrder, WarrantOrder) -> Ordering
+sortByWarrantPrice o1 o2 =  compare o1._2.offer.price o2._2.offer.price
+
+warrantMatchAccountOrder : WarrantOrder -> [(ContractId AccountOrder, AccountOrder)] -> [(ContractId AccountOrder, AccountOrder)]
+warrantMatchAccountOrder a b = case b of
+  [] -> []
+  x::xss -> if a.offer.price <= x._2.bid.price
+    then x::yss
+    else yss
+    where yss = (warrantMatchAccountOrder a xss)
+
+accountMatchWarrantOrder : AccountOrder -> [(ContractId WarrantOrder, WarrantOrder)] -> [(ContractId WarrantOrder, WarrantOrder)]
+accountMatchWarrantOrder a b = case b of
+  [] -> []
+  x::xss -> if a.bid.price >= x._2.offer.price
+    then x::yss
+    else yss
+    where yss = (accountMatchWarrantOrder a xss)

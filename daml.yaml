@@ -6,6 +6,7 @@ name: mycarbonbank
 source: daml
 init-script: Main:setup
 version: 0.0.1
+build-options: [--target=1.15]
 dependencies:
   - daml-prim
   - daml-stdlib

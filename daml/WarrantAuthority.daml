@@ -26,13 +26,13 @@ template Authority
       do
         warrantCid <- create Warrant 
           with
-            uniqueId = uniqueId
+            id = uniqueId
             warrantType = warrantType
             project = project
             issueTime = date 2022 Jan 01 -- need get current date
             expiredTime = expiredTime
             stakeholders = [owner]
-            collection = market
+            delegate = None
             issuer = creator
         stakeholderCid <- create Stakeholder 
           with

@@ -6,12 +6,16 @@ import Bank
 import Warrant
 import WarrantAuthority
 import DA.Date
+import DA.Map
 
-test = script do
+-- manual match, post a offer, and user choose
+test1 = script do
   bank <- allocateParty "bank"
  
   market <- allocateParty "market"
   authority <- allocateParty "authority"
+
+  delegate <- allocateParty "delegate"
 
   userA <- allocateParty "userA"
   userB <- allocateParty "userB"
@@ -34,20 +38,20 @@ test = script do
         amount = 1000.0
         owner = "userA"
 
-  -- 初始化银行
+  -- Initialize the bank
   bankCid <- submit bank do createCmd Bank with alias = "ICBC", token = "ICDB TOKEN", ..
   
-  -- 创建银行账号A和B
+  -- Create bank accounts A and B
   accountACid <- submit bank do exerciseCmd bankCid CreateAccount with owner = userA, money = 1000.0
   accountBCid <- submit bank do exerciseCmd bankCid CreateAccount with owner = userB, money = 1000.0
 
-  -- 初始化权证机构
+  -- Initialize the warrant authority
   authorityCid <- submit authority do createCmd Authority with creatorId = "authority token", creator = authority
 
-  -- 初始化市场
-  marketCid <- submit market do createCmd Market with name = "Epam", uniqueId = "Epam unique id", owner = market, warrants = [], observers = [authority]
+  -- Initialize the market
+  marketCid <- submit market do createCmd Market with name = "Epam", id = "Epam unique id", owner = market, warrants = [], observers = [authority]
 
-  -- 创建WarrantA
+  -- create WarrantA
   (warrantCid , stakeholderACid) <- submit authority
     do exerciseCmd authorityCid CreateWarrant 
         with 
@@ -56,13 +60,13 @@ test = script do
             project = userAProject
             expiredTime = date 2024 Jan 01
             owner = userA
-            market  = Market with name = "Epam", uniqueId = "Epam unique id", owner = market, warrants = [], observers = [authority] -- 需要优化
+            market  = Market with name = "Epam", id = "Epam unique id", owner = market, warrants = [], observers = [authority] -- 需要优化
   
   let
     currencyOffer = CurrencyOffer
       with
         currencyType = currencyType
-        money = 100.0
+        price = 100.0
     
     stakeBid = StakeBid
       with
@@ -70,22 +74,696 @@ test = script do
         warrantId = "unique warrant id"
         warrantType = warrantType
 
-  -- userA挂单售卖Warrant
-  (warrantTransferOfferCid, stakeholderACid) <- submit userA
-    do exerciseCmd stakeholderACid PostWarrantTransferOffer
+  -- User A sells Warrant
+  (warrantOrderCid, stakeholderACid) <- submit userA
+    do exerciseCmd stakeholderACid Stakeholder_PostOrder
         with
             offer = currencyOffer
             bid = stakeBid
-            observers = [market, userA, userB] -- 需要优化
+            observers = [market, userA, userB]
+            ..
   
-  -- userB认购warrant
+  -- userB accept warrant
   (accountAcceptOfferCid, stakeholderBCid) <- submit userB
-    do exerciseCmd warrantTransferOfferCid AccpetWarrantTransferOffer
+    do exerciseCmd warrantOrderCid WarrantOrder_Accpet
         with
           accountCid = accountBCid
           oneOfObservers = userB
   
-  -- userA接受money
-  submit userA do exerciseCmd accountAcceptOfferCid  AcceptAccountAcceptOffer with accountCid = accountACid
+  -- userA accept money
+  submit userA do exerciseCmd accountAcceptOfferCid AccountAcceptOffer_Accept with accountCid = accountACid
 
   pure()
+
+
+---------- warrant order match account list: test2 - test4 
+
+-- auto match, amount equal condition
+test2 = script do
+  bank <- allocateParty "bank"
+ 
+  market <- allocateParty "market"
+  authority <- allocateParty "authority"
+
+  userA <- allocateParty "userA"
+  userB <- allocateParty "userB"
+
+  let currencyType = CurrencyType with issuer = bank, symbol = "RMB"
+  let warrantType = WarrantType with issuer = authority, symbol = "Solar"
+  let userAProject = Project with name = "Epam internal test project", number = "001", amount = 1000.0, owner = "userA"
+
+  -- Initialize the bank
+  bankCid <- submit bank do createCmd Bank with alias = "ICBC", token = "ICDB TOKEN", ..
+  
+  -- Create bank accounts A and B
+  accountACid <- submit bank do exerciseCmd bankCid CreateAccount with owner = userA, money = 1000.0
+  accountBCid <- submit bank do exerciseCmd bankCid CreateAccount with owner = userB, money = 1000.0
+
+  -- Initialize the warrant authority
+  authorityCid <- submit authority do createCmd Authority with creatorId = "authority token", creator = authority
+
+  -- Initialize the market
+  -- marketCid <- submit market do createCmd Market with name = "Epam", uniqueId = "Epam unique id", owner = market, warrants = [], observers = [authority]
+
+  -- Initialize the market makers and their containers
+  marketMakerCid <- submit market
+    do createCmd MarketMaker
+        with   
+          id = "abcdefghijklmnopqrstuvwxyz"
+          name = "epamer"
+          maker = market
+          observers = []
+  
+  accountOrderContainerCid <- submit market do createCmd AccountOrderContainer with owner = market, orders = empty
+  warrantOrderContainerCid <- submit market do createCmd WarrantOrderContainer with owner = market, orders = empty
+
+  -- create WarrantA
+  (warrantCid , stakeholderACid) <- submit authority
+    do exerciseCmd authorityCid CreateWarrant 
+        with 
+            uniqueId = "unique warrant id"
+            warrantType = warrantType
+            project = userAProject
+            expiredTime = date 2024 Jan 01
+            owner = userA
+            market  = Market with name = "Epam", id = "Epam unique id", owner = market, warrants = [], observers = [authority]
+  
+  warrantCid <- submit userA do exerciseCmd warrantCid Warrant_SetDelegate with newDelegate = market, oneOfObservers = userA
+
+  -- User B wants to buy warrant
+  let stakeOffer = StakeOffer with warrantType = warrantType, amount = 100.0
+  let bid = Bid with price = 1.78, currencyType = currencyType
+  (accountBCid, accountOfferCid1) <- submit userB 
+    do exerciseCmd accountBCid Account_PostOrder
+        with
+          offer = stakeOffer
+          bid = bid
+          observers = [market, userA, userB]
+          delegate = market
+  
+  let bid = Bid with price = 1.76, currencyType = currencyType
+  (accountBCid, accountOfferCid2) <- submit userB 
+    do exerciseCmd accountBCid Account_PostOrder
+        with
+          offer = stakeOffer
+          bid = bid
+          observers = [market, userA, userB]
+          delegate = market
+  
+  let bid = Bid with price = 1.74, currencyType = currencyType
+  (accountBCid, accountOfferCid3) <- submit userB 
+    do exerciseCmd accountBCid Account_PostOrder
+        with
+          offer = stakeOffer
+          bid = bid
+          observers = [market, userA, userB]
+          delegate = market
+  
+  -- Add user B order to the list, the actual situation should be the matching process
+  accountOrderContainerCid <- submit market do exerciseCmd accountOrderContainerCid AccountOrderContainer_Add with k = accountOfferCid1
+  accountOrderContainerCid <- submit market do exerciseCmd accountOrderContainerCid AccountOrderContainer_Add with k = accountOfferCid2
+  accountOrderContainerCid <- submit market do exerciseCmd accountOrderContainerCid AccountOrderContainer_Add with k = accountOfferCid3
+
+  -- User A sells Warrant
+  let stakeBid = StakeBid with amount = 100.0, warrantId = "unique warrant id", warrantType = warrantType
+  let currencyOffer = CurrencyOffer with currencyType = currencyType, price = 1.76
+  (warrantOrderCid, stakeholderACid) <- submit userA
+    do exerciseCmd stakeholderACid Stakeholder_PostOrder
+        with
+            offer = currencyOffer
+            bid = stakeBid
+            observers = [market, userA, userB]
+            delegate = market
+            ..
+  
+  -- Order matching
+  (Some accountAcceptOfferCid, Some warrantAcceptOfferCid) <- submit market 
+      do exerciseCmd marketMakerCid HandleWarrantOrder 
+          with k = warrantOrderCid, w = warrantCid
+
+  -- userA accept money
+  submit userA do exerciseCmd accountAcceptOfferCid AccountAcceptOffer_Accept with accountCid = accountACid
+
+  -- userB accept stake
+  submit userB do exerciseCmd warrantAcceptOfferCid WarrantAcceptOffer_Accept
+
+  pure()
+
+-- auto match, account amount bigger than warrant amount condition
+test3 = script do
+  bank <- allocateParty "bank"
+ 
+  market <- allocateParty "market"
+  authority <- allocateParty "authority"
+
+  userA <- allocateParty "userA"
+  userB <- allocateParty "userB"
+
+  let currencyType = CurrencyType with issuer = bank, symbol = "RMB"
+  let warrantType = WarrantType with issuer = authority, symbol = "Solar"
+  let userAProject = Project with name = "Epam internal test project", number = "001", amount = 1000.0, owner = "userA"
+
+  -- Initialize the bank
+  bankCid <- submit bank do createCmd Bank with alias = "ICBC", token = "ICDB TOKEN", ..
+  
+  -- Create bank accounts A and B
+  accountACid <- submit bank do exerciseCmd bankCid CreateAccount with owner = userA, money = 1000.0
+  accountBCid <- submit bank do exerciseCmd bankCid CreateAccount with owner = userB, money = 1000.0
+
+  -- Initialize the warrant authority
+  authorityCid <- submit authority do createCmd Authority with creatorId = "authority token", creator = authority
+
+  -- Initialize the market
+  -- marketCid <- submit market do createCmd Market with name = "Epam", uniqueId = "Epam unique id", owner = market, warrants = [], observers = [authority]
+
+  -- Initialize the market makers and their containers
+  marketMakerCid <- submit market
+    do createCmd MarketMaker
+        with   
+          id = "abcdefghijklmnopqrstuvwxyz"
+          name = "epamer"
+          maker = market
+          observers = []
+  
+  accountOrderContainerCid <- submit market do createCmd AccountOrderContainer with owner = market, orders = empty
+  warrantOrderContainerCid <- submit market do createCmd WarrantOrderContainer with owner = market, orders = empty
+
+
+  -- create WarrantA
+  (warrantCid , stakeholderACid) <- submit authority
+    do exerciseCmd authorityCid CreateWarrant 
+        with 
+            uniqueId = "unique warrant id"
+            warrantType = warrantType
+            project = userAProject
+            expiredTime = date 2024 Jan 01
+            owner = userA
+            market  = Market with name = "Epam", id = "Epam unique id", owner = market, warrants = [], observers = [authority] -- 需要优化
+
+  warrantCid <- submit userA do exerciseCmd warrantCid Warrant_SetDelegate with newDelegate = market, oneOfObservers = userA
+
+  -- User B wants to buy warrant
+  let stakeOffer = StakeOffer with warrantType = warrantType, amount = 101.0
+  let bid = Bid with price = 1.78, currencyType = currencyType
+  (accountBCid, accountOfferCid1) <- submit userB 
+    do exerciseCmd accountBCid Account_PostOrder
+        with
+          offer = stakeOffer
+          bid = bid
+          observers = [market, userA, userB]
+          delegate = market
+  
+  let stakeOffer = StakeOffer with warrantType = warrantType, amount = 100.0
+  let bid = Bid with price = 1.76, currencyType = currencyType
+  (accountBCid, accountOfferCid2) <- submit userB 
+    do exerciseCmd accountBCid Account_PostOrder
+        with
+          offer = stakeOffer
+          bid = bid
+          observers = [market, userA, userB]
+          delegate = market
+  
+  let stakeOffer = StakeOffer with warrantType = warrantType, amount = 100.0
+  let bid = Bid with price = 1.74, currencyType = currencyType
+  (accountBCid, accountOfferCid3) <- submit userB 
+    do exerciseCmd accountBCid Account_PostOrder
+        with
+          offer = stakeOffer
+          bid = bid
+          observers = [market, userA, userB]
+          delegate = market
+  
+  -- Add user B order to the list, the actual situation should be the matching process
+  accountOrderContainerCid <- submit market do exerciseCmd accountOrderContainerCid AccountOrderContainer_Add with k = accountOfferCid1
+  accountOrderContainerCid <- submit market do exerciseCmd accountOrderContainerCid AccountOrderContainer_Add with k = accountOfferCid2
+  accountOrderContainerCid <- submit market do exerciseCmd accountOrderContainerCid AccountOrderContainer_Add with k = accountOfferCid3
+  -- User A sells Warrant
+  let stakeBid = StakeBid with amount = 100.0, warrantId = "unique warrant id", warrantType = warrantType
+  let currencyOffer = CurrencyOffer with currencyType = currencyType, price = 1.76
+  (warrantTransferOfferCid, stakeholderACid) <- submit userA
+    do exerciseCmd stakeholderACid Stakeholder_PostOrder
+        with
+            offer = currencyOffer
+            bid = stakeBid
+            observers = [market, userA, userB]
+            delegate = market
+            ..
+  
+  -- Order matching
+  (Some accountAcceptOfferCid, Some warrantAcceptOfferCid) <- submit market 
+      do exerciseCmd marketMakerCid HandleWarrantOrder 
+          with k = warrantTransferOfferCid, w = warrantCid
+
+  -- userA accept money
+  submit userA do exerciseCmd accountAcceptOfferCid AccountAcceptOffer_Accept with accountCid = accountACid
+
+  -- userB accept stake
+  submit userB do exerciseCmd warrantAcceptOfferCid WarrantAcceptOffer_Accept
+
+  pure()
+
+-- auto match, account amount less than warrant amount condition
+test4 = script do
+  bank <- allocateParty "bank"
+ 
+  market <- allocateParty "market"
+  authority <- allocateParty "authority"
+
+  userA <- allocateParty "userA"
+  userB <- allocateParty "userB"
+
+  let currencyType = CurrencyType with issuer = bank, symbol = "RMB"
+  let warrantType = WarrantType with issuer = authority, symbol = "Solar"
+  let userAProject = Project with name = "Epam internal test project", number = "001", amount = 1000.0, owner = "userA"
+
+  -- Initialize the bank
+  bankCid <- submit bank do createCmd Bank with alias = "ICBC", token = "ICDB TOKEN", ..
+  
+  -- Create bank accounts A and B
+  accountACid <- submit bank do exerciseCmd bankCid CreateAccount with owner = userA, money = 1000.0
+  accountBCid <- submit bank do exerciseCmd bankCid CreateAccount with owner = userB, money = 1000.0
+
+  -- Initialize the warrant authority
+  authorityCid <- submit authority do createCmd Authority with creatorId = "authority token", creator = authority
+
+  -- Initialize the market
+  -- marketCid <- submit market do createCmd Market with name = "Epam", uniqueId = "Epam unique id", owner = market, warrants = [], observers = [authority]
+
+  -- Initialize the market makers and their containers
+  marketMakerCid <- submit market
+    do createCmd MarketMaker
+        with   
+          id = "abcdefghijklmnopqrstuvwxyz"
+          name = "epamer"
+          maker = market
+          observers = []
+  
+  accountOrderContainerCid <- submit market do createCmd AccountOrderContainer with owner = market, orders = empty
+  warrantOrderContainerCid <- submit market do createCmd WarrantOrderContainer with owner = market, orders = empty
+
+
+  -- create WarrantA
+  (warrantCid , stakeholderACid) <- submit authority
+    do exerciseCmd authorityCid CreateWarrant 
+        with 
+            uniqueId = "unique warrant id"
+            warrantType = warrantType
+            project = userAProject
+            expiredTime = date 2024 Jan 01
+            owner = userA
+            market  = Market with name = "Epam", id = "Epam unique id", owner = market, warrants = [], observers = [authority]
+
+  warrantCid <- submit userA do exerciseCmd warrantCid Warrant_SetDelegate with newDelegate = market, oneOfObservers = userA
+
+  -- User B wants to buy warrant
+  let stakeOffer = StakeOffer with warrantType = warrantType, amount = 50.0
+  let bid = Bid with price = 1.78, currencyType = currencyType
+  (accountBCid, accountOfferCid1) <- submit userB 
+    do exerciseCmd accountBCid Account_PostOrder
+        with
+          offer = stakeOffer
+          bid = bid
+          observers = [market, userA, userB]
+          delegate = market
+  
+  let stakeOffer = StakeOffer with warrantType = warrantType, amount = 50.0
+  let bid = Bid with price = 1.76, currencyType = currencyType
+  (accountBCid, accountOfferCid2) <- submit userB 
+    do exerciseCmd accountBCid Account_PostOrder
+        with
+          offer = stakeOffer
+          bid = bid
+          observers = [market, userA, userB]
+          delegate = market
+  
+  let stakeOffer = StakeOffer with warrantType = warrantType, amount = 100.0
+  let bid = Bid with price = 1.74, currencyType = currencyType
+  (accountBCid, accountOfferCid3) <- submit userB 
+    do exerciseCmd accountBCid Account_PostOrder
+        with
+          offer = stakeOffer
+          bid = bid
+          observers = [market, userA, userB]
+          delegate = market
+  
+  -- Add user B order to the list, the actual situation should be the matching process
+  accountOrderContainerCid <- submit market do exerciseCmd accountOrderContainerCid AccountOrderContainer_Add with k = accountOfferCid1
+  accountOrderContainerCid <- submit market do exerciseCmd accountOrderContainerCid AccountOrderContainer_Add with k = accountOfferCid2
+  accountOrderContainerCid <- submit market do exerciseCmd accountOrderContainerCid AccountOrderContainer_Add with k = accountOfferCid3
+
+  -- User A sells Warrant
+  let stakeBid = StakeBid with amount = 100.0, warrantId = "unique warrant id", warrantType = warrantType
+  let currencyOffer = CurrencyOffer with currencyType = currencyType, price = 1.76
+  (warrantTransferOfferCid, stakeholderACid) <- submit userA
+    do exerciseCmd stakeholderACid Stakeholder_PostOrder
+        with
+            offer = currencyOffer
+            bid = stakeBid
+            observers = [market, userA, userB]
+            delegate = market
+            ..
+  
+  -- Order matching
+  (Some accountAcceptOfferCid, Some warrantAcceptOfferCid) <- submit market 
+      do exerciseCmd marketMakerCid HandleWarrantOrder 
+          with k = warrantTransferOfferCid, w = warrantCid
+
+  -- userA accept money
+  submit userA do exerciseCmd accountAcceptOfferCid AccountAcceptOffer_Accept with accountCid = accountACid
+
+  -- userB accept stake
+  submit userB do exerciseCmd warrantAcceptOfferCid WarrantAcceptOffer_Accept
+
+  pure()
+
+---------- warrant order match account list finish 
+
+
+---------- account order match warrant order list
+
+-- auto match, amount equal condition
+test5 = script do
+  bank <- allocateParty "bank"
+ 
+  market <- allocateParty "market"
+  authority <- allocateParty "authority"
+
+  userA <- allocateParty "userA"
+  userB <- allocateParty "userB"
+
+  let currencyType = CurrencyType with issuer = bank, symbol = "RMB"
+  let warrantType = WarrantType with issuer = authority, symbol = "Solar"
+  let userAProject = Project with name = "Epam internal test project", number = "001", amount = 1000.0, owner = "userA"
+
+  -- Initialize the bank
+  bankCid <- submit bank do createCmd Bank with alias = "ICBC", token = "ICDB TOKEN", ..
+  
+  -- Create bank accounts A and B
+  accountACid <- submit bank do exerciseCmd bankCid CreateAccount with owner = userA, money = 1000.0
+  accountBCid <- submit bank do exerciseCmd bankCid CreateAccount with owner = userB, money = 1000.0
+
+  -- Initialize the warrant authority
+  authorityCid <- submit authority do createCmd Authority with creatorId = "authority token", creator = authority
+
+  -- Initialize the market makers and their containers
+  marketMakerCid <- submit market
+    do createCmd MarketMaker
+        with   
+          id = "abcdefghijklmnopqrstuvwxyz"
+          name = "epamer"
+          maker = market
+          observers = []
+  
+  accountOrderContainerCid <- submit market do createCmd AccountOrderContainer with owner = market, orders = empty
+  warrantOrderContainerCid <- submit market do createCmd WarrantOrderContainer with owner = market, orders = empty
+
+  -- create WarrantA
+  (warrantCid , stakeholderACid) <- submit authority
+    do exerciseCmd authorityCid CreateWarrant 
+        with 
+            uniqueId = "123"
+            warrantType = warrantType
+            project = userAProject
+            expiredTime = date 2024 Jan 01
+            owner = userA
+            market  = Market with name = "Epam", id = "Epam unique id", owner = market, warrants = [], observers = [authority]
+  
+  -- set delegate
+  warrantCid <- submit userA do exerciseCmd warrantCid Warrant_SetDelegate with newDelegate = market, oneOfObservers = userA
+  
+  -- create warrant order
+  let currencyOffer = CurrencyOffer with price = 1.78, currencyType = currencyType
+  let stakeBid = StakeBid with amount = 100.0, warrantId = "123", warrantType = warrantType
+  (warrantOrderCid1, stakeholderACid) <- submit userA 
+    do exerciseCmd stakeholderACid Stakeholder_PostOrder 
+        with 
+          offer = currencyOffer
+          bid = stakeBid
+          observers = []
+          delegate = market
+  
+  let currencyOffer = CurrencyOffer with price = 1.76, currencyType = currencyType
+  let stakeBid = StakeBid with amount = 100.0, warrantId = "123", warrantType = warrantType
+  (warrantOrderCid2, stakeholderACid) <- submit userA 
+    do exerciseCmd stakeholderACid Stakeholder_PostOrder 
+        with 
+          offer = currencyOffer
+          bid = stakeBid
+          observers = []
+          delegate = market
+  
+  let currencyOffer = CurrencyOffer with price = 1.74, currencyType = currencyType
+  let stakeBid = StakeBid with amount = 100.0, warrantId = "123", warrantType = warrantType
+  (warrantOrderCid3, stakeholderACid) <- submit userA 
+    do exerciseCmd stakeholderACid Stakeholder_PostOrder 
+        with 
+          offer = currencyOffer
+          bid = stakeBid
+          observers = []
+          delegate = market
+  
+  -- add warrant order into list
+  (_, _) <- submit market do exerciseCmd marketMakerCid HandleWarrantOrder with k = warrantOrderCid1, w = warrantCid
+  (_, _) <- submit market do exerciseCmd marketMakerCid HandleWarrantOrder with k = warrantOrderCid2, w = warrantCid
+  (_, _) <- submit market do exerciseCmd marketMakerCid HandleWarrantOrder with k = warrantOrderCid3, w = warrantCid
+
+  let stakeOffer = StakeOffer with warrantType = warrantType, amount = 100.0
+  let bid = Bid with price = 1.76, currencyType = currencyType
+  (accountBCid, accountOrderCid) <- submit userB 
+    do exerciseCmd accountBCid Account_PostOrder
+        with
+          offer = stakeOffer
+          bid = bid
+          observers = [market, userA, userB]
+          delegate = market
+  
+  
+  -- -- Order matching
+  (Some accountAcceptOfferCid, Some warrantAcceptOfferCid) <- submit market do exerciseCmd marketMakerCid HandleAccountOrder with k = accountOrderCid
+
+  -- -- userA accept money
+  submit userA do exerciseCmd accountAcceptOfferCid AccountAcceptOffer_Accept with accountCid = accountACid
+
+  -- -- userB accept stake
+  submit userB do exerciseCmd warrantAcceptOfferCid WarrantAcceptOffer_Accept
+
+  pure()
+
+
+-- auto match, warrant amount bigger than account amount condition
+test6 = script do
+  bank <- allocateParty "bank"
+ 
+  market <- allocateParty "market"
+  authority <- allocateParty "authority"
+
+  userA <- allocateParty "userA"
+  userB <- allocateParty "userB"
+
+  let currencyType = CurrencyType with issuer = bank, symbol = "RMB"
+  let warrantType = WarrantType with issuer = authority, symbol = "Solar"
+  let userAProject = Project with name = "Epam internal test project", number = "001", amount = 1000.0, owner = "userA"
+
+  -- Initialize the bank
+  bankCid <- submit bank do createCmd Bank with alias = "ICBC", token = "ICDB TOKEN", ..
+  
+  -- Create bank accounts A and B
+  accountACid <- submit bank do exerciseCmd bankCid CreateAccount with owner = userA, money = 1000.0
+  accountBCid <- submit bank do exerciseCmd bankCid CreateAccount with owner = userB, money = 1000.0
+
+  -- Initialize the warrant authority
+  authorityCid <- submit authority do createCmd Authority with creatorId = "authority token", creator = authority
+
+  -- Initialize the market makers and their containers
+  marketMakerCid <- submit market
+    do createCmd MarketMaker
+        with   
+          id = "abcdefghijklmnopqrstuvwxyz"
+          name = "epamer"
+          maker = market
+          observers = []
+  
+  accountOrderContainerCid <- submit market do createCmd AccountOrderContainer with owner = market, orders = empty
+  warrantOrderContainerCid <- submit market do createCmd WarrantOrderContainer with owner = market, orders = empty
+
+
+  -- create WarrantA
+  (warrantCid , stakeholderACid) <- submit authority
+    do exerciseCmd authorityCid CreateWarrant 
+        with 
+            uniqueId = "123"
+            warrantType = warrantType
+            project = userAProject
+            expiredTime = date 2024 Jan 01
+            owner = userA
+            market  = Market with name = "Epam", id = "Epam unique id", owner = market, warrants = [], observers = [authority]
+  
+  warrantCid <- submit userA do exerciseCmd warrantCid Warrant_SetDelegate with newDelegate = market, oneOfObservers = userA
+  
+  -- create warrant order
+  let currencyOffer = CurrencyOffer with price = 1.78, currencyType = currencyType
+  let stakeBid = StakeBid with amount = 100.0, warrantId = "123", warrantType = warrantType
+  (warrantOrderCid1, stakeholderACid) <- submit userA 
+    do exerciseCmd stakeholderACid Stakeholder_PostOrder 
+        with 
+          offer = currencyOffer
+          bid = stakeBid
+          observers = []
+          delegate = market
+  
+  let currencyOffer = CurrencyOffer with price = 1.76, currencyType = currencyType
+  let stakeBid = StakeBid with amount = 100.0, warrantId = "123", warrantType = warrantType
+  (warrantOrderCid2, stakeholderACid) <- submit userA 
+    do exerciseCmd stakeholderACid Stakeholder_PostOrder 
+        with 
+          offer = currencyOffer
+          bid = stakeBid
+          observers = []
+          delegate = market
+  
+  let currencyOffer = CurrencyOffer with price = 1.74, currencyType = currencyType
+  let stakeBid = StakeBid with amount = 150.0, warrantId = "123", warrantType = warrantType
+  (warrantOrderCid3, stakeholderACid) <- submit userA 
+    do exerciseCmd stakeholderACid Stakeholder_PostOrder 
+        with 
+          offer = currencyOffer
+          bid = stakeBid
+          observers = []
+          delegate = market
+  
+  -- add warrant order into list
+  (_, _) <- submit market do exerciseCmd marketMakerCid HandleWarrantOrder with k = warrantOrderCid1, w = warrantCid
+  (_, _) <- submit market do exerciseCmd marketMakerCid HandleWarrantOrder with k = warrantOrderCid2, w = warrantCid
+  (_, _) <- submit market do exerciseCmd marketMakerCid HandleWarrantOrder with k = warrantOrderCid3, w = warrantCid
+
+  let stakeOffer = StakeOffer with warrantType = warrantType, amount = 100.0
+  let bid = Bid with price = 1.76, currencyType = currencyType
+  (accountBCid, accountOrderCid) <- submit userB 
+    do exerciseCmd accountBCid Account_PostOrder
+        with
+          offer = stakeOffer
+          bid = bid
+          observers = [market, userA, userB]
+          delegate = market
+  
+  
+  -- Order matching
+  (Some accountAcceptOfferCid, Some warrantAcceptOfferCid) <- submit market do exerciseCmd marketMakerCid HandleAccountOrder with k = accountOrderCid
+
+  -- userA accept money
+  submit userA do exerciseCmd accountAcceptOfferCid AccountAcceptOffer_Accept with accountCid = accountACid
+
+  -- userB accept stake
+  submit userB do exerciseCmd warrantAcceptOfferCid WarrantAcceptOffer_Accept
+
+  pure()
+
+
+-- auto match, amount equal condition
+test7 = script do
+  bank <- allocateParty "bank"
+ 
+  market <- allocateParty "market"
+  authority <- allocateParty "authority"
+
+  userA <- allocateParty "userA"
+  userB <- allocateParty "userB"
+
+  let currencyType = CurrencyType with issuer = bank, symbol = "RMB"
+  let warrantType = WarrantType with issuer = authority, symbol = "Solar"
+  let userAProject = Project with name = "Epam internal test project", number = "001", amount = 1000.0, owner = "userA"
+
+  -- Initialize the bank
+  bankCid <- submit bank do createCmd Bank with alias = "ICBC", token = "ICDB TOKEN", ..
+  
+  -- Create bank accounts A and B
+  accountACid <- submit bank do exerciseCmd bankCid CreateAccount with owner = userA, money = 1000.0
+  accountBCid <- submit bank do exerciseCmd bankCid CreateAccount with owner = userB, money = 1000.0
+
+  -- Initialize the warrant authority
+  authorityCid <- submit authority do createCmd Authority with creatorId = "authority token", creator = authority
+
+  -- Initialize the market makers and their containers
+  marketMakerCid <- submit market
+    do createCmd MarketMaker
+        with   
+          id = "abcdefghijklmnopqrstuvwxyz"
+          name = "epamer"
+          maker = market
+          observers = []
+  
+  accountOrderContainerCid <- submit market do createCmd AccountOrderContainer with owner = market, orders = empty
+  warrantOrderContainerCid <- submit market do createCmd WarrantOrderContainer with owner = market, orders = empty
+
+  -- create WarrantA
+  (warrantCid , stakeholderACid) <- submit authority
+    do exerciseCmd authorityCid CreateWarrant 
+        with 
+            uniqueId = "123"
+            warrantType = warrantType
+            project = userAProject
+            expiredTime = date 2024 Jan 01
+            owner = userA
+            market  = Market with name = "Epam", id = "Epam unique id", owner = market, warrants = [], observers = [authority]
+  
+  warrantCid <- submit userA do exerciseCmd warrantCid Warrant_SetDelegate with newDelegate = market, oneOfObservers = userA
+  
+  -- create warrant order
+  let currencyOffer = CurrencyOffer with price = 1.78, currencyType = currencyType
+  let stakeBid = StakeBid with amount = 100.0, warrantId = "123", warrantType = warrantType
+  (warrantOrderCid1, stakeholderACid) <- submit userA 
+    do exerciseCmd stakeholderACid Stakeholder_PostOrder 
+        with 
+          offer = currencyOffer
+          bid = stakeBid
+          observers = []
+          delegate = market
+  
+  let currencyOffer = CurrencyOffer with price = 1.76, currencyType = currencyType
+  let stakeBid = StakeBid with amount = 100.0, warrantId = "123", warrantType = warrantType
+  (warrantOrderCid2, stakeholderACid) <- submit userA 
+    do exerciseCmd stakeholderACid Stakeholder_PostOrder 
+        with 
+          offer = currencyOffer
+          bid = stakeBid
+          observers = []
+          delegate = market
+  
+  let currencyOffer = CurrencyOffer with price = 1.74, currencyType = currencyType
+  let stakeBid = StakeBid with amount = 50.0, warrantId = "123", warrantType = warrantType
+  (warrantOrderCid3, stakeholderACid) <- submit userA 
+    do exerciseCmd stakeholderACid Stakeholder_PostOrder 
+        with 
+          offer = currencyOffer
+          bid = stakeBid
+          observers = []
+          delegate = market
+  
+  -- add warrant order into list
+  (_, _) <- submit market do exerciseCmd marketMakerCid HandleWarrantOrder with k = warrantOrderCid1, w = warrantCid
+  (_, _) <- submit market do exerciseCmd marketMakerCid HandleWarrantOrder with k = warrantOrderCid2, w = warrantCid
+  (_, _) <- submit market do exerciseCmd marketMakerCid HandleWarrantOrder with k = warrantOrderCid3, w = warrantCid
+
+  let stakeOffer = StakeOffer with warrantType = warrantType, amount = 100.0
+  let bid = Bid with price = 1.76, currencyType = currencyType
+  (accountBCid, accountOrderCid) <- submit userB 
+    do exerciseCmd accountBCid Account_PostOrder
+        with
+          offer = stakeOffer
+          bid = bid
+          observers = [market, userA, userB]
+          delegate = market
+  
+  
+  -- Order matching
+  (Some accountAcceptOfferCid, Some warrantAcceptOfferCid) <- submit market do exerciseCmd marketMakerCid HandleAccountOrder with k = accountOrderCid
+
+  -- userA accept money
+  submit userA do exerciseCmd accountAcceptOfferCid AccountAcceptOffer_Accept with accountCid = accountACid
+
+  -- userB accept stake
+  submit userB do exerciseCmd warrantAcceptOfferCid WarrantAcceptOffer_Accept
+
+  pure()
+
+-- finish

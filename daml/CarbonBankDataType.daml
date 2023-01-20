@@ -9,7 +9,7 @@ data CurrencyType = CurrencyType
 data CurrencyOffer = CurrencyOffer
   with
     currencyType : CurrencyType
-    money : Decimal
+    price : Decimal 
       deriving(Show, Eq)
 
 data WarrantType = WarrantType 
@@ -34,7 +34,7 @@ data Project = Project
 
 data Bid = Bid
   with
-    money : Decimal
+    price : Decimal
     currencyType : CurrencyType
       deriving(Show, Eq)
 
@@ -51,3 +51,5 @@ data StakeholderKey = StakeholderKey
     owner : Party
     warrantId : Text
       deriving(Show, Eq)
+
+      
