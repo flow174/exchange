@@ -1,6 +1,6 @@
-# MyCarbonBank
+# Exchange
 
-This is a carbon warrant exchange poc project.
+This is a poc exchange project.
 
 
 # Buiness flow chat
